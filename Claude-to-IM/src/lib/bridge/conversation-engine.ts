@@ -68,6 +68,7 @@ export async function processMessage(
   files?: FileAttachment[],
   onPartialText?: OnPartialText,
   onToolEvent?: OnToolEvent,
+  overridePermissionMode?: string,
 ): Promise<ConversationResult> {
   const { store, llm } = getBridgeContext();
   const sessionId = binding.codepilotSessionId;
@@ -140,12 +141,16 @@ export async function processMessage(
     // Effective model
     const effectiveModel = binding.model || session?.model || store.getSetting('default_model') || undefined;
 
-    // Permission mode from binding mode
+    // Permission mode from binding mode (can be overridden per-call)
     let permissionMode: string;
-    switch (binding.mode) {
-      case 'plan': permissionMode = 'plan'; break;
-      case 'ask': permissionMode = 'default'; break;
-      default: permissionMode = 'acceptEdits'; break;
+    if (overridePermissionMode) {
+      permissionMode = overridePermissionMode;
+    } else {
+      switch (binding.mode) {
+        case 'plan': permissionMode = 'plan'; break;
+        case 'ask': permissionMode = 'default'; break;
+        default: permissionMode = 'acceptEdits'; break;
+      }
     }
 
     // Load conversation history for context

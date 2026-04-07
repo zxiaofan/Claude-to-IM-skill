@@ -395,7 +395,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
         },
       };
 
-      const createResp = await (this.restClient as any).cardkit.v2.card.create({
+      const createResp = await (this.restClient as any).cardkit.v1.card.create({
         data: { type: 'card_json', data: JSON.stringify(cardBody) },
       });
       const cardId = createResp?.data?.card_id;
@@ -497,13 +497,25 @@ export class FeishuAdapter extends BaseChannelAdapter {
     const cardId = state.cardId;
 
     // Fire-and-forget — streaming updates are non-critical
-    (this.restClient as any).cardkit.v2.card.streamContent({
+    // v1 SDK has no streamContent; use batchUpdate with update_element action
+    const actions = JSON.stringify([{
+      action: 'update_element',
+      element_id: 'streaming_content',
+      element: {
+        tag: 'markdown',
+        content,
+        text_align: 'left',
+        text_size: 'normal',
+        element_id: 'streaming_content',
+      },
+    }]);
+    (this.restClient as any).cardkit.v1.card.batchUpdate({
       path: { card_id: cardId },
-      data: { content, sequence: seq },
+      data: { actions, sequence: seq },
     }).then(() => {
       state.lastUpdateAt = Date.now();
     }).catch((err: unknown) => {
-      console.warn('[feishu-adapter] streamContent failed:', err instanceof Error ? err.message : err);
+      console.warn('[feishu-adapter] batchUpdate failed:', err instanceof Error ? err.message : err);
     });
   }
 
@@ -542,11 +554,14 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
 
     try {
-      // Step 1: Close streaming mode
+      // Step 1: Close streaming mode via v1 settings API
       state.sequence++;
-      await (this.restClient as any).cardkit.v2.card.settings.streamingMode.set({
+      await (this.restClient as any).cardkit.v1.card.settings({
         path: { card_id: state.cardId },
-        data: { streaming_mode: false, sequence: state.sequence },
+        data: {
+          settings: JSON.stringify({ streaming_mode: false }),
+          sequence: state.sequence,
+        },
       });
 
       // Step 2: Build and apply final card
@@ -564,9 +579,12 @@ export class FeishuAdapter extends BaseChannelAdapter {
       const finalCardJson = buildFinalCardJson(responseText, state.toolCalls, footer);
 
       state.sequence++;
-      await (this.restClient as any).cardkit.v2.card.update({
+      await (this.restClient as any).cardkit.v1.card.update({
         path: { card_id: state.cardId },
-        data: { type: 'card_json', data: finalCardJson, sequence: state.sequence },
+        data: {
+          card: { type: 'card_json', data: finalCardJson },
+          sequence: state.sequence,
+        },
       });
 
       console.log(`[feishu-adapter] Card finalized: cardId=${state.cardId}, status=${status}, elapsed=${formatElapsed(elapsedMs)}`);

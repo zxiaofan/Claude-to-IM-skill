@@ -27,6 +27,8 @@ import {
   sanitizeInput,
   validateMode,
 } from './security/validators.js';
+import fs from 'fs';
+import path from 'path';
 
 const GLOBAL_KEY = '__bridge_manager__';
 
@@ -57,6 +59,61 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
   const minDeltaChars = parseInt(store.getSetting(`${prefix}min_delta_chars`) || '', 10) || defaults.minDeltaChars;
   const maxChars = parseInt(store.getSetting(`${prefix}max_chars`) || '', 10) || defaults.maxChars;
   return { intervalMs, minDeltaChars, maxChars };
+}
+
+/**
+ * Known bridge commands that are handled locally (fast, no LLM call).
+ * Used by runAdapterLoop to decide whether a `/` message should run inline
+ * (bridge commands) or go through session lock (unknown → forwarded to LLM).
+ */
+const BRIDGE_COMMANDS = new Set([
+  '/start', '/new', '/bind', '/cwd', '/mode', '/model',
+  '/status', '/sessions', '/stop', '/perm', '/help',
+]);
+
+function isBridgeCommand(text: string): boolean {
+  const command = text.split(/\s+/)[0].split('@')[0].toLowerCase();
+  return BRIDGE_COMMANDS.has(command);
+}
+
+/**
+ * Resolve an ECC plugin command file for an unknown slash command.
+ * Scans installed plugin cache for a matching `commands/<name>.md` file.
+ * Returns the file content with ARGUMENTS appended, or null if not found.
+ *
+ * This replicates what Claude Code does when the user types `/plan` in the
+ * terminal — the skill/command file is loaded and included in the prompt.
+ */
+function resolvePluginCommand(commandName: string, args: string): string | null {
+  const pluginBase = path.join(
+    process.env.HOME || '/root',
+    '.claude', 'plugins', 'cache',
+  );
+  if (!fs.existsSync(pluginBase)) return null;
+
+  // Walk plugin cache: <pluginBase>/<marketplace>/<plugin>/<version>/commands/<name>.md
+  try {
+    for (const marketplace of fs.readdirSync(pluginBase)) {
+      const mpDir = path.join(pluginBase, marketplace);
+      if (!fs.statSync(mpDir).isDirectory()) continue;
+      for (const plugin of fs.readdirSync(mpDir)) {
+        const plugDir = path.join(mpDir, plugin);
+        if (!fs.statSync(plugDir).isDirectory()) continue;
+        for (const version of fs.readdirSync(plugDir)) {
+          const cmdFile = path.join(plugDir, version, 'commands', `${commandName}.md`);
+          if (fs.existsSync(cmdFile)) {
+            const content = fs.readFileSync(cmdFile, 'utf-8');
+            // Strip frontmatter (--- ... ---) — it's metadata, not prompt content
+            const stripped = content.replace(/^---[\s\S]*?---\n*/, '');
+            return args
+              ? `${stripped}\n\nARGUMENTS: ${args}`
+              : stripped;
+          }
+        }
+      }
+    }
+  } catch { /* best effort */ }
+  return null;
 }
 
 /**
@@ -394,9 +451,10 @@ function runAdapterLoop(adapter: BaseChannelAdapter): void {
         // deadlocks (permission waits for "1", "1" waits for lock release).
         if (
           msg.callbackData ||
-          msg.text.trim().startsWith('/') ||
+          isBridgeCommand(msg.text.trim()) ||
           isNumericPermissionShortcut(adapter.channelType, msg.text.trim(), msg.address.chatId)
         ) {
+          // Known bridge commands and permission shortcuts run inline (fast, no LLM).
           await handleMessage(adapter, msg);
         } else {
           const binding = router.resolve(msg.address);
@@ -565,14 +623,34 @@ async function handleMessage(
   }
 
   // Check for IM commands (before sanitization — commands are validated individually)
+  // Unrecognized commands fall through to the LLM as regular prompts.
+  let messageText = rawText;
+  let isResolvedSkill = false;
   if (rawText.startsWith('/')) {
-    await handleCommand(adapter, msg, rawText);
-    ack();
-    return;
+    const handled = await handleCommand(adapter, msg, rawText);
+    if (handled) {
+      ack();
+      return;
+    }
+    // Not a bridge command — try to resolve as an ECC plugin command.
+    // If found, inject the skill template so Claude behaves the same as
+    // in the interactive terminal.  Otherwise strip the leading '/' to
+    // avoid the CLI's "Unknown skill" error (SDK stream-json mode doesn't
+    // resolve plugin commands via stdin messages).
+    const parts = rawText.slice(1).split(/\s+/);
+    const cmdName = parts[0].split('@')[0].toLowerCase();
+    const cmdArgs = parts.slice(1).join(' ').trim();
+    const skillContent = resolvePluginCommand(cmdName, cmdArgs);
+    if (skillContent) {
+      messageText = skillContent;
+      isResolvedSkill = true;
+    } else {
+      messageText = rawText.replace(/^\//, '');
+    }
   }
 
   // Sanitize general message text before routing to conversation engine
-  const { text, truncated } = sanitizeInput(rawText);
+  const { text, truncated } = sanitizeInput(messageText);
   if (truncated) {
     console.warn(`[bridge-manager] Input truncated from ${rawText.length} to ${text.length} chars for chat ${msg.address.chatId}`);
     store.insertAuditLog({
@@ -706,7 +784,9 @@ async function handleMessage(
         perm.suggestions,
         msg.messageId,
       );
-    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent);
+    }, taskAbort.signal, hasAttachments ? msg.attachments : undefined, onPartialText, onToolEvent,
+    // Resolved plugin commands use acceptEdits to avoid excessive permission prompts
+    isResolvedSkill ? 'acceptEdits' : undefined);
 
     // Finalize streaming card if adapter supports it.
     // onStreamEnd awaits any in-flight card creation and returns true if a card
@@ -780,7 +860,7 @@ async function handleCommand(
   adapter: BaseChannelAdapter,
   msg: InboundMessage,
   text: string,
-): Promise<void> {
+): Promise<boolean> {
   const { store } = getBridgeContext();
 
   // Extract command and args (handle /command@botname format)
@@ -805,7 +885,7 @@ async function handleCommand(
       parseMode: 'plain',
       replyToMessageId: msg.messageId,
     });
-    return;
+    return true;
   }
 
   let response = '';
@@ -822,11 +902,14 @@ async function handleCommand(
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/model &lt;name&gt; - Switch model',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
         '/help - Show this help',
+        '',
+        'Other /commands are forwarded to Claude.',
       ].join('\n');
       break;
 
@@ -969,17 +1052,32 @@ async function handleCommand(
         '/bind &lt;session_id&gt; - Bind to existing session',
         '/cwd /path - Change working directory',
         '/mode plan|code|ask - Change mode',
+        '/model &lt;name&gt; - Switch model',
         '/status - Show current status',
         '/sessions - List recent sessions',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '1/2/3 - Quick permission reply (Feishu/QQ/WeChat, single pending)',
         '/help - Show this help',
+        '',
+        'Other /commands are forwarded to Claude.',
       ].join('\n');
       break;
 
+    case '/model': {
+      const binding = router.resolve(msg.address);
+      if (!args) {
+        response = `Current model: <code>${escapeHtml(binding.model || 'default')}</code>`;
+      } else {
+        router.updateBinding(binding.id, { model: args });
+        response = `Model set to <code>${escapeHtml(args)}</code>`;
+      }
+      break;
+    }
+
     default:
-      response = `Unknown command: ${escapeHtml(command)}\nType /help for available commands.`;
+      // Unknown command — let it fall through to the LLM
+      return false;
   }
 
   if (response) {
@@ -990,6 +1088,7 @@ async function handleCommand(
       replyToMessageId: msg.messageId,
     });
   }
+  return true;
 }
 
 // ── SDK Session Update Logic ─────────────────────────────────

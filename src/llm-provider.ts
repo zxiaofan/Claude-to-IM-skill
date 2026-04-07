@@ -685,6 +685,12 @@ export function handleMessage(
     case 'result': {
       state.hasReceivedResult = true;
       if (msg.subtype === 'success') {
+        // If the SDK returned a result text but no text events were streamed
+        // (e.g. CLI handled a slash command internally like "/plan"),
+        // emit the result text so it reaches the conversation engine.
+        if ('result' in msg && msg.result && !state.hasStreamedText) {
+          controller.enqueue(sseEvent('text', String(msg.result)));
+        }
         controller.enqueue(
           sseEvent('result', {
             session_id: msg.session_id,
