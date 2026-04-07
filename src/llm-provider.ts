@@ -468,6 +468,11 @@ export class SDKLLMProvider implements LLMProvider {
               abortController: params.abortController,
               permissionMode: (params.permissionMode as 'default' | 'acceptEdits' | 'plan') || undefined,
               includePartialMessages: true,
+              // Pass systemPrompt as an append to the default claude_code preset,
+              // so Claude keeps all default behaviour AND gets group context.
+              ...(params.systemPrompt
+                ? { systemPrompt: { type: 'preset', preset: 'claude_code', append: params.systemPrompt } }
+                : {}),
               env: cleanEnv,
               stderr: (data: string) => {
                 stderrBuf += data;

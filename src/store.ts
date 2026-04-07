@@ -287,6 +287,15 @@ export class JsonFileStore implements BridgeStore {
     }
   }
 
+  updateSession(sessionId: string, updates: Partial<Pick<BridgeSession, 'system_prompt' | 'working_directory'>>): void {
+    const s = this.sessions.get(sessionId);
+    if (s) {
+      if (updates.system_prompt !== undefined) s.system_prompt = updates.system_prompt;
+      if (updates.working_directory !== undefined) s.working_directory = updates.working_directory;
+      this.persistSessions();
+    }
+  }
+
   // ── Messages ──
 
   addMessage(sessionId: string, role: string, content: string, _usage?: string | null): void {
