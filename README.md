@@ -233,6 +233,28 @@ All commands are run inside Claude Code or Codex:
 | `/claude-to-im reconfigure` | "reconfigure" / "修改配置" | Update config interactively |
 | `/claude-to-im doctor` | "doctor" / "诊断" | Diagnose issues |
 
+### Chat Commands (in IM)
+
+These commands are typed directly in the IM chat (Telegram, Discord, Feishu, etc.):
+
+| Command | Description |
+|---|---|
+| `/new [path]` | Start a new session (optionally with a working directory) |
+| `/bind <session_id>` | Bind chat to an existing session by ID |
+| `/sessions` | List recent sessions with numbered index |
+| `/resume` | Resume the most recent other session |
+| `/resume N` | Resume the Nth session from `/sessions` list |
+| `/resume <id>` | Resume a session by ID prefix match |
+| `/cwd /path` | Change working directory |
+| `/mode plan\|code\|ask` | Switch mode |
+| `/model <name>` | Switch model |
+| `/status` | Show current session status |
+| `/stop` | Stop the current running task |
+| `/perm allow\|deny <id>` | Respond to a permission request |
+| `/help` | Show command help |
+
+Other `/commands` are forwarded to Claude as skill invocations.
+
 ## Platform Setup Guides
 
 The `setup` wizard provides inline guidance for every step. Here's a summary:

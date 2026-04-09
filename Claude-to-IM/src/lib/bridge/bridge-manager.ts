@@ -68,7 +68,7 @@ function getStreamConfig(channelType = 'telegram'): StreamConfig {
  */
 const BRIDGE_COMMANDS = new Set([
   '/start', '/new', '/bind', '/cwd', '/mode', '/model',
-  '/status', '/sessions', '/stop', '/perm', '/help',
+  '/status', '/sessions', '/resume', '/stop', '/perm', '/help',
 ]);
 
 function isBridgeCommand(text: string): boolean {
@@ -905,6 +905,7 @@ async function handleCommand(
         '/model &lt;name&gt; - Switch model',
         '/status - Show current status',
         '/sessions - List recent sessions',
+        '/resume [N|id] - Resume recent / Nth / specific session',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission',
         '/help - Show this help',
@@ -996,16 +997,87 @@ async function handleCommand(
     }
 
     case '/sessions': {
-      const bindings = router.listBindings(adapter.channelType);
+      const currentBinding = router.resolve(msg.address);
+      const bindings = router.listBindings(adapter.channelType)
+        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
       if (bindings.length === 0) {
         response = 'No sessions found.';
       } else {
-        const lines = ['<b>Sessions:</b>', ''];
-        for (const b of bindings.slice(0, 10)) {
-          const active = b.active ? 'active' : 'inactive';
-          lines.push(`<code>${b.codepilotSessionId.slice(0, 8)}...</code> [${active}] ${escapeHtml(b.workingDirectory || '~')}`);
+        const lines = ['<b>Sessions</b> (use <code>/resume N</code> to switch)', ''];
+        for (let i = 0; i < Math.min(bindings.length, 15); i++) {
+          const b = bindings[i];
+          const isCurrent = b.id === currentBinding.id;
+          const marker = isCurrent ? ' ◀' : '';
+          const ts = b.updatedAt ? new Date(b.updatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '';
+          const cwd = b.workingDirectory ? path.basename(b.workingDirectory) : '~';
+          lines.push(`[${i + 1}] <code>${b.codepilotSessionId.slice(0, 8)}</code> ${escapeHtml(cwd)} [${ts}]${marker}`);
         }
         response = lines.join('\n');
+      }
+      break;
+    }
+
+    case '/resume': {
+      const currentBinding = router.resolve(msg.address);
+      const bindings = router.listBindings(adapter.channelType)
+        .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+
+      if (bindings.length === 0) {
+        response = 'No sessions to resume.';
+        break;
+      }
+
+      let target: typeof bindings[0] | undefined;
+
+      if (!args) {
+        // No args: resume the most recent session that is NOT the current one
+        target = bindings.find(b => b.id !== currentBinding.id);
+        if (!target) {
+          response = 'Only one session exists. Nothing to switch to.';
+          break;
+        }
+      } else if (/^\d+$/.test(args)) {
+        // Numeric: index into the sessions list (1-based)
+        const idx = parseInt(args, 10) - 1;
+        if (idx < 0 || idx >= bindings.length) {
+          response = `Invalid index. Use 1-${bindings.length}.`;
+          break;
+        }
+        target = bindings[idx];
+      } else {
+        // Treat as session ID prefix match
+        const prefix = args.toLowerCase();
+        target = bindings.find(b => b.codepilotSessionId.toLowerCase().startsWith(prefix));
+        if (!target) {
+          response = `No session matching <code>${escapeHtml(args)}</code>.`;
+          break;
+        }
+      }
+
+      if (target.id === currentBinding.id) {
+        response = `Already on this session (<code>${target.codepilotSessionId.slice(0, 8)}</code>).`;
+        break;
+      }
+
+      // Switch: bind current chat to the target session
+      const resumed = router.bindToSession(msg.address, target.codepilotSessionId);
+      if (resumed) {
+        // Carry over sdkSessionId from the target binding (if the target was
+        // previously used from another chat) so the SDK can resume the
+        // conversation.  If the target has no sdkSessionId, clear it so the
+        // next message starts a fresh SDK conversation instead of failing
+        // with "no conversation found".
+        router.updateBinding(resumed.id, {
+          sdkSessionId: target.sdkSessionId || '',
+        });
+        const cwd = resumed.workingDirectory ? path.basename(resumed.workingDirectory) : '~';
+        response = [
+          `Resumed session <code>${resumed.codepilotSessionId.slice(0, 8)}</code>`,
+          `CWD: <code>${escapeHtml(resumed.workingDirectory || '~')}</code>`,
+          `Mode: <b>${resumed.mode}</b>`,
+        ].join('\n');
+      } else {
+        response = 'Failed to resume session.';
       }
       break;
     }
@@ -1055,6 +1127,7 @@ async function handleCommand(
         '/model &lt;name&gt; - Switch model',
         '/status - Show current status',
         '/sessions - List recent sessions',
+        '/resume [N|id] - Resume recent / Nth / specific session',
         '/stop - Stop current session',
         '/perm allow|allow_session|deny &lt;id&gt; - Respond to permission request',
         '1/2/3 - Quick permission reply (Feishu/QQ/WeChat, single pending)',

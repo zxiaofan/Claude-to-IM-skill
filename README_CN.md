@@ -233,6 +233,28 @@ start bridge
 | `/claude-to-im reconfigure` | "reconfigure" / "修改配置" | 交互式修改配置 |
 | `/claude-to-im doctor` | "doctor" / "诊断" | 诊断问题 |
 
+### 聊天命令（IM 端）
+
+以下命令直接在 IM 聊天中输入（Telegram、Discord、飞书等）：
+
+| 命令 | 说明 |
+|---|---|
+| `/new [path]` | 创建新会话（可选指定工作目录） |
+| `/bind <session_id>` | 绑定到已有会话 |
+| `/sessions` | 列出最近会话（带编号） |
+| `/resume` | 恢复最近的其他会话 |
+| `/resume N` | 恢复 `/sessions` 列表中第 N 个会话 |
+| `/resume <id>` | 按会话 ID 前缀匹配恢复 |
+| `/cwd /path` | 切换工作目录 |
+| `/mode plan\|code\|ask` | 切换模式 |
+| `/model <name>` | 切换模型 |
+| `/status` | 查看当前会话状态 |
+| `/stop` | 停止当前运行的任务 |
+| `/perm allow\|deny <id>` | 响应权限请求 |
+| `/help` | 显示命令帮助 |
+
+其他 `/命令` 会被转发给 Claude 作为 skill 调用。
+
 ## 平台配置指南
 
 `setup` 向导会在每一步提供内联指引，以下是概要：
